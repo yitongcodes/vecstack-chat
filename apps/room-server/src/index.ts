@@ -25,7 +25,10 @@ const MIME: Record<string, string> = {
 };
 
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void {
-  const urlPath = (req.url ?? '/').split('?')[0];
+  // Decode %5B → [ etc. so Next.js chunks in [id] directories resolve correctly.
+  let urlPath: string;
+  try { urlPath = decodeURIComponent((req.url ?? '/').split('?')[0]); }
+  catch { urlPath = (req.url ?? '/').split('?')[0]; }
   const candidates = [
     path.join(STATIC_DIR, urlPath),
     path.join(STATIC_DIR, urlPath, 'index.html'),
