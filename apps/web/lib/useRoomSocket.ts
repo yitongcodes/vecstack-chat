@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import type { ClientToServer, ServerToClient } from '@vecstack/shared';
+import type { ServerToClient } from '@vecstack/shared';
 
 export type ConnectionStatus = 'connecting' | 'open' | 'closed';
 
@@ -11,56 +11,57 @@ export interface UseRoomSocketArgs {
   displayName: string;
 }
 
+// In local dev the room-server runs on a different port from Next.js.
+// In production both are on the same origin, so we use window.location.origin.
+function apiBase(): string {
+  if (typeof window === 'undefined') return 'http://localhost:8080';
+  return process.env.NEXT_PUBLIC_API_URL ?? window.location.origin;
+}
+
 export function useRoomSocket({ roomId, userId, displayName }: UseRoomSocketArgs) {
-  const wsRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('connecting');
   const [events, setEvents] = useState<ServerToClient[]>([]);
+  // Keep stable refs so the send closure always has the latest values
+  const roomIdRef = useRef(roomId);
+  const userIdRef = useRef(userId);
+  useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
+  useEffect(() => { userIdRef.current = userId; }, [userId]);
 
   useEffect(() => {
-    // In production the WS server is on the same host as the page.
-    // In local dev, fall back to localhost:8080.
-    const url =
-      process.env.NEXT_PUBLIC_WS_URL ??
-      (typeof window !== 'undefined'
-        ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
-        : 'ws://localhost:8080');
-    const ws = new WebSocket(`${url}/ws`);
-    wsRef.current = ws;
+    const base = apiBase();
+    const params = new URLSearchParams({ roomId, userId, displayName });
+    const es = new EventSource(`${base}/api/room/events?${params}`);
 
-    ws.addEventListener('open', () => {
-      setStatus('open');
-      const join: ClientToServer = { type: 'join', roomId, userId, displayName };
-      ws.send(JSON.stringify(join));
-    });
+    es.onopen = () => setStatus('open');
 
-    ws.addEventListener('message', (e) => {
+    es.onmessage = (e) => {
       try {
-        const msg = JSON.parse(e.data) as ServerToClient;
+        const msg = JSON.parse(e.data as string) as ServerToClient;
         setEvents((prev) => [...prev, msg]);
       } catch (err) {
-        console.error('bad WS payload', err);
+        console.error('[sse] bad payload', err);
       }
-    });
+    };
 
-    ws.addEventListener('close', () => setStatus('closed'));
-    ws.addEventListener('error', () => setStatus('closed'));
-
-    // Simple keepalive ping every 30s
-    const ping = setInterval(() => {
-      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
-    }, 30_000);
+    es.onerror = () => {
+      setStatus('closed');
+      // EventSource auto-reconnects; reflect that in the status briefly
+      setTimeout(() => setStatus('connecting'), 0);
+    };
 
     return () => {
-      clearInterval(ping);
-      ws.close();
+      es.close();
+      setStatus('closed');
     };
   }, [roomId, userId, displayName]);
 
   function send(text: string) {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== ws.OPEN) return;
-    const out: ClientToServer = { type: 'send', text };
-    ws.send(JSON.stringify(out));
+    const base = apiBase();
+    fetch(`${base}/api/room/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ roomId: roomIdRef.current, userId: userIdRef.current, text }),
+    }).catch((err) => console.error('[send]', err));
   }
 
   return { status, events, send };

@@ -1,4 +1,4 @@
-import type { WebSocket } from 'ws';
+import type http from 'node:http';
 import type { Agent, Message, Participant, ServerToClient } from '@vecstack/shared';
 import {
   getAgentsInRoom,
@@ -8,20 +8,20 @@ import {
 } from '../storage/repo.js';
 
 interface Client {
-  ws: WebSocket;
+  res: http.ServerResponse;
   userId: string;
   displayName: string;
 }
 
 /**
- * A Room holds the in-memory state for an active chatroom: connected sockets,
- * cached agent list, and a small broadcast log. Persistence is in Postgres;
- * this is just the live state for routing messages.
+ * A Room holds the in-memory state for an active chatroom: connected SSE
+ * responses, cached agent list. Persistence is in Postgres; this is just
+ * the live state for routing messages.
  */
 export class Room {
   readonly id: string;
   readonly name: string;
-  private clients = new Map<string, Set<Client>>(); // userId -> set of sockets (a user can have multiple tabs open)
+  private clients = new Map<string, Set<Client>>(); // userId → set of SSE responses
   private agents: Agent[] = [];
 
   private constructor(id: string, name: string) {
@@ -36,7 +36,6 @@ export class Room {
     return room;
   }
 
-  /** Re-fetch agents from DB (call after a new agent joins). */
   async refreshAgents(): Promise<void> {
     this.agents = await getAgentsInRoom(this.id);
   }
@@ -65,7 +64,7 @@ export class Room {
     set.delete(client);
     if (set.size === 0) {
       this.clients.delete(client.userId);
-      return true; // user fully disconnected
+      return true;
     }
     return false;
   }
@@ -74,25 +73,21 @@ export class Room {
     return this.clients.size === 0;
   }
 
-  /** Broadcast a server→client envelope to every connected socket in the room. */
   broadcast(msg: ServerToClient): void {
-    const json = JSON.stringify(msg);
+    const payload = `data: ${JSON.stringify(msg)}\n\n`;
     for (const set of this.clients.values()) {
       for (const c of set) {
-        if (c.ws.readyState === c.ws.OPEN) {
-          c.ws.send(json);
-        }
+        try { c.res.write(payload); } catch { /* client disconnected */ }
       }
     }
   }
 
-  /** Send only to a specific user's connections (used for private replies). */
   sendToUser(userId: string, msg: ServerToClient): void {
     const set = this.clients.get(userId);
     if (!set) return;
-    const json = JSON.stringify(msg);
+    const payload = `data: ${JSON.stringify(msg)}\n\n`;
     for (const c of set) {
-      if (c.ws.readyState === c.ws.OPEN) c.ws.send(json);
+      try { c.res.write(payload); } catch { /* client disconnected */ }
     }
   }
 
@@ -106,9 +101,6 @@ export class Room {
 }
 
 // ─── Process-wide room registry ─────────────────────────────────────────────
-// Rooms are loaded on first connection and dropped when the last client leaves.
-// On Fly this single process is the authority for any room it has loaded.
-// (Multi-process scale-out is step 8+: route by room_id to a specific machine.)
 
 const rooms = new Map<string, Room>();
 const loading = new Map<string, Promise<Room>>();
