@@ -43,9 +43,8 @@ export async function handleSSEConnect(
 
   try {
     await getOrCreateUser(userId, displayName);
+    const room = await getRoom(roomId);   // creates room row first
     await ensureUserInRoom(roomId, userId);
-
-    const room = await getRoom(roomId);
     const client = { res, userId, displayName };
     room.addClient(client);
 
